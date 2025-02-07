@@ -1,0 +1,49 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:15
+    container_name: db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5433:5432"
+    networks:
+      - app-network
+
+  # Pinger Service
+  pinger-service:
+    build:
+      context: ./pinger
+      dockerfile: Dockerfile
+    container_name: pinger-service
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - app-network
+    depends_on:
+      - backend-service
+
+  # Backend Service
+  backend-service:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: backend-service
+    environment:
+      DATABASE_URL: "postgres://admin:secret@db:5432/pinger_db?sslmode=disable"
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+    networks:
+      - app-network
+
+volumes:
+  pgdata:
+
+networks:
+  app-network:
+    driver: bridge

@@ -1,78 +1,80 @@
 package service
 
 import (
-	"bytes"
+	"context"
 	"fmt"
-	"os/exec"
-	"strings"
+	"github.com/Quizert/Docker-pinger/pinger/internal/model"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/client"
+	"log"
+	"time"
 )
 
 type BackEndClient interface {
-	sendContainerInfo() error
+	SendPingResult(results []*model.ContainerInfo) error
 }
 
 type PingerService struct {
-	client BackEndClient
+	BackEndClient BackEndClient
+	DockerClient  *client.Client
 }
 
-func NewPingerService(client BackEndClient) *PingerService {
-	return &PingerService{client: client}
+func NewPingerService(backEndClient BackEndClient, dockerClient *client.Client) *PingerService {
+	return &PingerService{BackEndClient: backEndClient, DockerClient: dockerClient}
 }
 
-// getContainerInfo получает список всех контейнеров и их информацию
-func getContainerInfo() ([]model.ContainerInfo, error) {
-	var result []ContainerInfo
+func (p *PingerService) Ping(ctx context.Context) error {
+	for {
+		containers, err := getContainersInfo(p.DockerClient)
+		if err != nil {
+			log.Printf("Ошибка получения данных: %v", err)
+			continue
+		}
 
-	// Получаем список всех контейнеров (их ID)
-	cmd := exec.Command("docker", "ps", "-aq")
-	output, err := cmd.Output()
+		if err := p.BackEndClient.SendPingResult(containers); err != nil {
+			log.Printf("Ошибка отправки данных: %v", err)
+		}
+		fmt.Println(containers)
+		time.Sleep(15 * time.Second) // Интервал опроса
+	}
+}
+
+func getContainersInfo(cli *client.Client) ([]*model.ContainerInfo, error) {
+	ctx := context.Background()
+
+	// Получаем список контейнеров
+	containers, err := cli.ContainerList(ctx, container.ListOptions{All: true})
 	if err != nil {
 		return nil, err
 	}
 
-	containerIDs := strings.Fields(string(output)) // Разбиваем output по строкам
-	if len(containerIDs) == 0 {
-		return result, nil // Возвращаем пустой список, если контейнеров нет
-	}
+	var result []*model.ContainerInfo
 
-	// Для каждого контейнера получаем информацию
-	for _, id := range containerIDs {
-		info, err := inspectContainer(id)
+	for _, c := range containers {
+		// Получаем детальную информацию для получения IP-адреса
+		details, err := cli.ContainerInspect(ctx, c.ID)
 		if err != nil {
-			fmt.Println("Ошибка при получении информации о контейнере:", err)
+			log.Printf("Ошибка инспекции контейнера %s: %v", c.ID, err)
 			continue
 		}
-		result = append(result, info)
+
+		// Извлекаем IP-адрес из сетевых настроек
+		var ip string
+		if details.NetworkSettings != nil {
+			for _, network := range details.NetworkSettings.Networks {
+				if network.IPAddress != "" {
+					ip = network.IPAddress
+					break
+				}
+			}
+		}
+
+		result = append(result, &model.ContainerInfo{
+			Name:   c.Names[0][1:],
+			IP:     ip,
+			Status: c.Status,
+		})
 	}
 
 	return result, nil
-}
-
-// inspectContainer получает имя, статус и IP контейнера
-func inspectContainer(containerID string) (ContainerInfo, error) {
-	cmd := exec.Command("docker", "inspect", "--format",
-		"{{.Name}} {{.State.Status}} {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-		containerID)
-
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	err := cmd.Run()
-	if err != nil {
-		return ContainerInfo{}, err
-	}
-
-	data := strings.Fields(output.String()) // Разбиваем строку
-	if len(data) < 2 {
-		return ContainerInfo{}, fmt.Errorf("неполные данные: %v", data)
-	}
-
-	// Убираем `/` перед именем контейнера
-	name := strings.TrimPrefix(data[0], "/")
-	status := data[1]
-	ip := ""
-	if len(data) > 2 {
-		ip = data[2]
-	}
-
-	return ContainerInfo{Name: name, Status: status, IP: ip}, nil
 }
